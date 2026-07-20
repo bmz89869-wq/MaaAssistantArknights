@@ -15,6 +15,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using MaaWpfGui.Helper;
+using MaaWpfGui.Models.ExternalNotification;
 using MaaWpfGui.ViewModels.UI;
 using Serilog;
 
@@ -22,28 +23,25 @@ namespace MaaWpfGui.Services.Notification;
 
 public static class ExternalNotificationService
 {
-    private static readonly List<Task> _taskContainers = new List<Task>();
+    private static readonly List<Task> _taskContainers = [];
 
     private static readonly ILogger _logger = Log.Logger;
 
     private static async Task SendAsync(string title, string content, bool isTest = false)
     {
-        var enabledProviders = SettingsViewModel.ExternalNotificationSettings.EnabledExternalNotificationProviderList;
-
-        foreach (var enabledProvider in enabledProviders)
+        var notificationList = SettingsViewModel.ExternalNotificationSettings.ExternalNotificationConfigs.AsReadOnly();
+        foreach (var config in notificationList)
         {
-            IExternalNotificationProvider provider = enabledProvider switch
-            {
-                "Gotify" => new GotifyNotificationProvider(Instances.HttpService),
-                "ServerChan" => new ServerChanNotificationProvider(Instances.HttpService),
-                "Telegram" => new TelegramNotificationProvider(Instances.HttpService),
-                "Discord" => new DiscordNotificationProvider(Instances.HttpService),
-                "DingTalk" => new DingTalkNotificationProvider(Instances.HttpService),
-                "Discord Webhook" => new DiscordWebhookNotificationProvider(Instances.HttpService),
-                "Custom Webhook" => new CustomWebhookNotificationProvider(Instances.HttpService),
-                "SMTP" => new SmtpNotificationProvider(),
-                "Bark" => new BarkNotificationProvider(Instances.HttpService),
-                "Qmsg" => new QmsgNotificationProvider(Instances.HttpService),
+            IExternalNotificationProvider provider = config switch {
+                GotifyConfig gotify => new GotifyNotificationProvider(Instances.HttpService, gotify),
+                ServerChanConfig serverChan => new ServerChanNotificationProvider(Instances.HttpService, serverChan),
+                TelegramConfig telegram => new TelegramNotificationProvider(Instances.HttpService, telegram),
+                DiscordConfig discord => new DiscordNotificationProvider(Instances.HttpService, discord),
+                DingTalkConfig dingTalk => new DingTalkNotificationProvider(Instances.HttpService, dingTalk),
+                CustomWebhookConfig custom => new CustomWebhookNotificationProvider(Instances.HttpService, custom),
+                SmtpConfig smtp => new SmtpNotificationProvider(smtp),
+                BarkConfig bark => new BarkNotificationProvider(Instances.HttpService, bark),
+                QmsgConfig qmsg => new QmsgNotificationProvider(Instances.HttpService, qmsg),
                 _ => new DummyNotificationProvider(),
             };
 
@@ -63,7 +61,7 @@ public static class ExternalNotificationService
             }
 
             ToastNotification.ShowDirect(
-                enabledProvider + " " +
+                config.GetType().Name + " " +
                 LocalizationHelper.GetString(result ? "ExternalNotificationSendSuccess" : "ExternalNotificationSendFail"));
         }
     }
