@@ -31,12 +31,8 @@ bool asst::BlueStacksStreamBridge::start(
     const auto ffmpeg = adb_path.parent_path() / L"ffmpeg.exe";
     if (!std::filesystem::exists(executable) || !std::filesystem::exists(server) ||
         !std::filesystem::exists(adb_path) || !std::filesystem::exists(ffmpeg)) {
-        Log.info(
-            "BlueStacks stream bridge unavailable",
-            VAR(executable),
-            VAR(server),
-            VAR(adb_path),
-            VAR(ffmpeg));
+        LogInfo << "BlueStacks stream bridge unavailable" << VAR(executable) << VAR(server) << VAR(adb_path)
+                << VAR(ffmpeg);
         return false;
     }
 
