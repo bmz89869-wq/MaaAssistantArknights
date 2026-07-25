@@ -16,6 +16,9 @@
 #include "LDExtras.h"
 #include "MumuExtras.h"
 #include "Utils/StringMisc.hpp"
+#ifdef _WIN32
+#include "BlueStacksStreamBridge.h"
+#endif
 
 namespace asst
 {
@@ -152,6 +155,7 @@ protected:
 
     // 每 1 分钟检测一次模拟器帧率，回调给 UI 用于低帧率提示
     void check_fps();
+    void record_screencap_cost(bool success, long long duration_ms);
 
     AdbConnectionContext m_conn_ctx;
 
@@ -230,6 +234,10 @@ protected:
 #if ASST_WITH_EMULATOR_EXTRAS
     MumuExtras m_mumu_extras;
     LDExtras m_ld_extras;
+#endif
+#ifdef _WIN32
+    BlueStacksStreamBridge m_bluestacks_stream_bridge;
+    bool m_bluestacks_stream_bridge_reported = false;
 #endif
 };
 } // namespace asst

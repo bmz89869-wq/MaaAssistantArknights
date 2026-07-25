@@ -21,6 +21,7 @@
 #include "Utils/Logger.hpp"
 #include "Utils/Platform.hpp"
 #include "Utils/StringMisc.hpp"
+#include "Utils/WorkingDir.hpp"
 
 #include <boost/regex.hpp>
 
@@ -392,6 +393,10 @@ std::optional<unsigned short> asst::AdbController::init_socket(const std::string
 
 void asst::AdbController::clear_info() noexcept
 {
+#ifdef _WIN32
+    m_bluestacks_stream_bridge.stop();
+    m_bluestacks_stream_bridge_reported = false;
+#endif
     m_inited = false;
     // 等待可能仍在执行的异步帧率检测
     if (m_fps_future.valid()) {
@@ -526,6 +531,9 @@ std::pair<int, int> asst::AdbController::get_screen_res() const noexcept
 
 void asst::AdbController::release()
 {
+#ifdef _WIN32
+    m_bluestacks_stream_bridge.stop();
+#endif
     close_socket();
 
     if (m_kill_adb_on_exit && !m_adb.release.empty()) {
@@ -575,6 +583,29 @@ bool asst::AdbController::convert_lf(std::string& data)
 bool asst::AdbController::screencap(cv::Mat& image_payload, bool allow_reconnect)
 {
     using namespace std::chrono;
+    image_payload = cv::Mat();
+#ifdef _WIN32
+    const auto bridge_started_at = high_resolution_clock::now();
+    if (m_bluestacks_stream_bridge.screencap(image_payload)) {
+        const auto duration = duration_cast<milliseconds>(high_resolution_clock::now() - bridge_started_at);
+        m_inited = true;
+        if (!m_bluestacks_stream_bridge_reported) {
+            json::value info = json::object {
+                { "uuid", m_uuid },
+                { "what", "FastestWayToScreencap" },
+                { "details",
+                  json::object {
+                      { "method", "BlueStacksStreamBridge" },
+                      { "cost", duration.count() },
+                  } },
+            };
+            callback(AsstMsg::ConnectionInfo, info);
+            m_bluestacks_stream_bridge_reported = true;
+        }
+        record_screencap_cost(true, duration.count());
+        return true;
+    }
+#endif
     DecodeFunc decode_raw = [&](const std::string& data) -> bool {
         if (data.size() < 8) {
             return false;
@@ -626,7 +657,6 @@ bool asst::AdbController::screencap(cv::Mat& image_payload, bool allow_reconnect
         return true;
     };
 
-    image_payload = cv::Mat(); // 清空缓存
     if (m_adb.screencap_method == AdbProperty::ScreencapMethod::UnknownYet) {
         std::vector<std::pair<AdbProperty::ScreencapMethod, std::string>> all_methods_cost;
 
@@ -804,46 +834,46 @@ bool asst::AdbController::screencap(cv::Mat& image_payload, bool allow_reconnect
             break;
         }
         auto duration = duration_cast<milliseconds>(high_resolution_clock::now() - start_time);
-        // 记录截图耗时，每10次截图回传一次最值+平均值
-        m_screencap_cost.emplace_back(screencap_ret ? duration.count() : -1); // 记录截图耗时
-        ++m_screencap_times;
-
-        if (m_screencap_cost.size() > 30) {
-            m_screencap_cost.pop_front();
-        }
-        if (m_screencap_times > 9) { // 每 10 次截图计算一次平均耗时
-            m_screencap_times = 0;
-            auto filtered_cost = m_screencap_cost | std::views::filter([](auto num) { return num > 0; });
-            if (filtered_cost.empty()) {
-                return screencap_ret;
-            }
-            // 过滤后的有效截图用时次数
-            auto filtered_count = m_screencap_cost.size() - std::ranges::count(m_screencap_cost, -1);
-            auto [screencap_cost_min, screencap_cost_max] = std::ranges::minmax(filtered_cost);
-            json::value info = json::object {
-                { "uuid", m_uuid },
-                { "what", "ScreencapCost" },
-                { "details",
-                  json::object {
-                      { "min", screencap_cost_min },
-                      { "max", screencap_cost_max },
-                      { "avg",
-                        filtered_count > 0
-                            ? std::accumulate(filtered_cost.begin(), filtered_cost.end(), 0ll) / filtered_count
-                            : -1 },
-                  } },
-            };
-            if (m_screencap_cost.size() > filtered_count) {
-                info["details"]["fault_times"] = m_screencap_cost.size() - filtered_count;
-            }
-            callback(AsstMsg::ConnectionInfo, info);
-        }
-
-        // 每 1 分钟检测一次模拟器帧率
-        check_fps();
-
+        record_screencap_cost(screencap_ret, duration.count());
         return screencap_ret;
     }
+}
+
+void asst::AdbController::record_screencap_cost(bool success, long long duration_ms)
+{
+    m_screencap_cost.emplace_back(success ? duration_ms : -1);
+    ++m_screencap_times;
+
+    if (m_screencap_cost.size() > 30) {
+        m_screencap_cost.pop_front();
+    }
+    if (m_screencap_times > 9) {
+        m_screencap_times = 0;
+        auto filtered_cost = m_screencap_cost | std::views::filter([](auto num) { return num > 0; });
+        if (filtered_cost.empty()) {
+            return;
+        }
+        const auto filtered_count = m_screencap_cost.size() - std::ranges::count(m_screencap_cost, -1);
+        const auto [screencap_cost_min, screencap_cost_max] = std::ranges::minmax(filtered_cost);
+        json::value info = json::object {
+            { "uuid", m_uuid },
+            { "what", "ScreencapCost" },
+            { "details",
+              json::object {
+                  { "min", screencap_cost_min },
+                  { "max", screencap_cost_max },
+                  { "avg",
+                    filtered_count > 0
+                        ? std::accumulate(filtered_cost.begin(), filtered_cost.end(), 0ll) / filtered_count
+                        : -1 },
+              } },
+        };
+        if (m_screencap_cost.size() > filtered_count) {
+            info["details"]["fault_times"] = m_screencap_cost.size() - filtered_count;
+        }
+        callback(AsstMsg::ConnectionInfo, info);
+    }
+    check_fps();
 }
 
 bool asst::AdbController::screencap(
@@ -1253,6 +1283,14 @@ bool asst::AdbController::connect(const std::string& adb_path, const std::string
     else if (config == "LDPlayer") {
         init_ld_extras(adb_cfg, address);
     }
+#ifdef _WIN32
+    else if (config == "BlueStacks") {
+        m_bluestacks_stream_bridge.start(
+            UserDir.get() / "BlueStacksStreamBridge",
+            utils::path(adb_path),
+            address);
+    }
+#endif
     if (need_exit()) {
         return false;
     }
