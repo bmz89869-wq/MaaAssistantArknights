@@ -7,6 +7,7 @@
 #endif
 #include <Windows.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,7 @@ public:
         const std::filesystem::path& adb_path,
         const std::string& address);
     bool screencap(cv::Mat& image);
+    void invalidate_after_input() noexcept;
     void stop() noexcept;
 
 private:
@@ -65,14 +67,15 @@ private:
     static constexpr std::size_t MappingBytes = HeaderBytes + 1920ULL * 1080ULL * 4ULL;
     static constexpr std::int32_t OutputWidth = 1280;
     static constexpr std::int32_t OutputHeight = 720;
-    static constexpr std::int64_t MaximumFrameAgeUs = 250'000;
+    static constexpr std::int64_t InputFrameWaitUs = 250'000;
 
     bool open_mapping() noexcept;
     bool process_running() noexcept;
-    bool try_screencap(cv::Mat& image);
+    bool try_screencap(cv::Mat& image, std::int64_t required_after_us);
     void close_mapping() noexcept;
     static std::wstring quote_arg(const std::wstring& value);
     static std::int64_t query_performance_counter_us(std::int64_t frequency) noexcept;
+    static std::int64_t query_performance_counter_us() noexcept;
 
     HANDLE m_process = nullptr;
     HANDLE m_job = nullptr;
@@ -82,6 +85,7 @@ private:
     std::wstring m_mapping_name;
     std::vector<std::uint8_t> m_frame_buffer;
     std::chrono::steady_clock::time_point m_started_at;
+    std::atomic<std::int64_t> m_required_frame_after_us = 0;
     bool m_ready_logged = false;
     bool m_exit_logged = false;
 };

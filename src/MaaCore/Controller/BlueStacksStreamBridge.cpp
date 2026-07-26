@@ -112,13 +112,19 @@ bool asst::BlueStacksStreamBridge::start(
 bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
 {
     constexpr auto StartupWarmup = std::chrono::milliseconds(1500);
-    const auto deadline = m_started_at + StartupWarmup;
+    const auto attempt_started_at = std::chrono::steady_clock::now();
+    const auto startup_deadline = m_started_at + StartupWarmup;
+    const auto input_deadline = attempt_started_at + std::chrono::microseconds(InputFrameWaitUs);
 
     do {
-        if (try_screencap(image)) {
+        const auto required_after_us = m_required_frame_after_us.load(std::memory_order_acquire);
+        if (try_screencap(image, required_after_us)) {
             return true;
         }
-        if (m_ready_logged || m_started_at == std::chrono::steady_clock::time_point {} ||
+
+        const auto deadline = !m_ready_logged ? startup_deadline
+                                               : required_after_us > 0 ? input_deadline : attempt_started_at;
+        if (m_started_at == std::chrono::steady_clock::time_point {} ||
             std::chrono::steady_clock::now() >= deadline || !process_running()) {
             return false;
         }
@@ -126,7 +132,12 @@ bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
     } while (true);
 }
 
-bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image)
+void asst::BlueStacksStreamBridge::invalidate_after_input() noexcept
+{
+    m_required_frame_after_us.store(query_performance_counter_us(), std::memory_order_release);
+}
+
+bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image, std::int64_t required_after_us)
 {
     if (!process_running() || (!m_view && !open_mapping())) {
         return false;
@@ -171,7 +182,8 @@ bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image)
 
         const auto now_us = query_performance_counter_us(qpc_frequency);
         const auto age_us = now_us - decoded_host_us;
-        if (now_us <= 0 || decoded_host_us <= 0 || age_us < -50'000 || age_us > MaximumFrameAgeUs) {
+        if (now_us <= 0 || decoded_host_us <= 0 || age_us < -50'000 ||
+            (required_after_us > 0 && decoded_host_us < required_after_us)) {
             return false;
         }
 
@@ -183,6 +195,15 @@ bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image)
         if (!m_ready_logged) {
             Log.info("BlueStacks stream bridge first frame accepted", width, height, "age", age_us, "us");
             m_ready_logged = true;
+        }
+
+        auto expected_required_after_us = required_after_us;
+        if (expected_required_after_us > 0) {
+            m_required_frame_after_us.compare_exchange_strong(
+                expected_required_after_us,
+                0,
+                std::memory_order_release,
+                std::memory_order_relaxed);
         }
         return true;
     }
@@ -209,6 +230,7 @@ void asst::BlueStacksStreamBridge::stop() noexcept
     m_mapping_name.clear();
     m_frame_buffer.clear();
     m_started_at = {};
+    m_required_frame_after_us.store(0, std::memory_order_relaxed);
     m_ready_logged = false;
     m_exit_logged = false;
 }
@@ -291,6 +313,12 @@ std::int64_t asst::BlueStacksStreamBridge::query_performance_counter_us(std::int
         return 0;
     }
     return seconds * 1'000'000 + remainder * 1'000'000 / frequency;
+}
+
+std::int64_t asst::BlueStacksStreamBridge::query_performance_counter_us() noexcept
+{
+    LARGE_INTEGER frequency {};
+    return ::QueryPerformanceFrequency(&frequency) ? query_performance_counter_us(frequency.QuadPart) : 0;
 }
 
 #endif

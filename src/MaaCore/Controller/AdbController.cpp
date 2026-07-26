@@ -427,6 +427,11 @@ bool asst::AdbController::start_game(const std::string& client_type)
 
     std::string cur_cmd = utils::string_replace_all(m_adb.start, "[PackageName]", package_name.value());
     bool ret = call_command(cur_cmd).has_value();
+#ifdef _WIN32
+    if (ret) {
+        m_bluestacks_stream_bridge.invalidate_after_input();
+    }
+#endif
 
     return ret;
 }
@@ -442,6 +447,11 @@ bool asst::AdbController::stop_game(const std::string& client_type)
     }
     std::string cur_cmd = utils::string_replace_all(m_adb.stop, "[PackageName]", package_name.value());
     bool ret = call_command(cur_cmd).has_value();
+#ifdef _WIN32
+    if (ret) {
+        m_bluestacks_stream_bridge.invalidate_after_input();
+    }
+#endif
 
     return ret;
 }
@@ -454,7 +464,13 @@ bool asst::AdbController::click(const Point& p)
 
     std::string cur_cmd =
         utils::string_replace_all(m_adb.click, { { "[x]", std::to_string(p.x) }, { "[y]", std::to_string(p.y) } });
-    return call_command(cur_cmd).has_value();
+    const bool ret = call_command(cur_cmd).has_value();
+#ifdef _WIN32
+    if (ret) {
+        m_bluestacks_stream_bridge.invalidate_after_input();
+    }
+#endif
+    return ret;
 }
 
 bool asst::AdbController::input(const std::string& text)
@@ -464,7 +480,13 @@ bool asst::AdbController::input(const std::string& text)
     }
 
     std::string cur_cmd = utils::string_replace_all(m_adb.input, { { "[text]", text } });
-    return call_command(cur_cmd).has_value();
+    const bool ret = call_command(cur_cmd).has_value();
+#ifdef _WIN32
+    if (ret) {
+        m_bluestacks_stream_bridge.invalidate_after_input();
+    }
+#endif
+    return ret;
 }
 
 bool asst::AdbController::swipe(
@@ -514,6 +536,11 @@ bool asst::AdbController::swipe(
             });
         ret &= call_command(extra_cmd).has_value();
     }
+#ifdef _WIN32
+    if (ret) {
+        m_bluestacks_stream_bridge.invalidate_after_input();
+    }
+#endif
     return ret;
 }
 
@@ -521,7 +548,13 @@ bool asst::AdbController::press_esc()
 {
     LogTraceFunction;
 
-    return call_command(m_adb.press_esc).has_value();
+    const bool ret = call_command(m_adb.press_esc).has_value();
+#ifdef _WIN32
+    if (ret) {
+        m_bluestacks_stream_bridge.invalidate_after_input();
+    }
+#endif
+    return ret;
 }
 
 std::pair<int, int> asst::AdbController::get_screen_res() const noexcept
@@ -1389,6 +1422,11 @@ void asst::AdbController::check_fps()
 
 void asst::AdbController::back_to_home() noexcept
 {
-    call_command(m_adb.back_to_home);
+    const auto ret = call_command(m_adb.back_to_home);
+#ifdef _WIN32
+    if (ret) {
+        m_bluestacks_stream_bridge.invalidate_after_input();
+    }
+#endif
     return;
 }
