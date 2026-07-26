@@ -128,8 +128,11 @@ bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
         return false;
     }
 
+    // InterlockedCompareExchange64 is a read-modify-write operation and faults on FILE_MAP_READ views.
+    const std::atomic_ref<LONG64> sequence(const_cast<LONG64&>(header->sequence));
+
     for (int attempt = 0; attempt != 2; ++attempt) {
-        const auto before = ::InterlockedCompareExchange64(const_cast<volatile LONG64*>(&header->sequence), 0, 0);
+        const auto before = sequence.load(std::memory_order_acquire);
         if (before == 0 || (before & 1) != 0) {
             continue;
         }
@@ -142,9 +145,8 @@ bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
         const auto qpc_frequency = header->qpc_frequency;
         m_frame_buffer.resize(static_cast<std::size_t>(frame_bytes));
         std::memcpy(m_frame_buffer.data(), m_view + HeaderBytes, m_frame_buffer.size());
-        ::MemoryBarrier();
 
-        const auto after = ::InterlockedCompareExchange64(const_cast<volatile LONG64*>(&header->sequence), 0, 0);
+        const auto after = sequence.load(std::memory_order_acquire);
         if (before != after || (after & 1) != 0) {
             continue;
         }
