@@ -105,10 +105,28 @@ bool asst::BlueStacksStreamBridge::start(
         "BlueStacks stream bridge started",
         process_info.dwProcessId,
         std::filesystem::path(m_mapping_name));
+    m_started_at = std::chrono::steady_clock::now();
     return true;
 }
 
 bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
+{
+    constexpr auto StartupWarmup = std::chrono::milliseconds(1500);
+    const auto deadline = m_started_at + StartupWarmup;
+
+    do {
+        if (try_screencap(image)) {
+            return true;
+        }
+        if (m_ready_logged || m_started_at == std::chrono::steady_clock::time_point {} ||
+            std::chrono::steady_clock::now() >= deadline || !process_running()) {
+            return false;
+        }
+        ::Sleep(20);
+    } while (true);
+}
+
+bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image)
 {
     if (!process_running() || (!m_view && !open_mapping())) {
         return false;
@@ -190,6 +208,7 @@ void asst::BlueStacksStreamBridge::stop() noexcept
     m_job = nullptr;
     m_mapping_name.clear();
     m_frame_buffer.clear();
+    m_started_at = {};
     m_ready_logged = false;
     m_exit_logged = false;
 }

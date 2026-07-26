@@ -7,6 +7,7 @@
 #endif
 #include <Windows.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -68,6 +69,7 @@ private:
 
     bool open_mapping() noexcept;
     bool process_running() noexcept;
+    bool try_screencap(cv::Mat& image);
     void close_mapping() noexcept;
     static std::wstring quote_arg(const std::wstring& value);
     static std::int64_t query_performance_counter_us(std::int64_t frequency) noexcept;
@@ -79,6 +81,7 @@ private:
     const std::byte* m_view = nullptr;
     std::wstring m_mapping_name;
     std::vector<std::uint8_t> m_frame_buffer;
+    std::chrono::steady_clock::time_point m_started_at;
     bool m_ready_logged = false;
     bool m_exit_logged = false;
 };
