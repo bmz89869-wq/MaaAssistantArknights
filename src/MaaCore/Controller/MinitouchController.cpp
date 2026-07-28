@@ -146,6 +146,7 @@ bool asst::MinitouchController::click(const Point& p)
     Log.trace(m_use_maa_touch ? "maatouch" : "minitouch", "click:", p);
     bool ret = m_minitoucher->down(p.x, p.y) && m_minitoucher->up();
     if (ret) {
+        invalidate_bluestacks_stream_frame();
         m_minitoucher->extra_sleep();
     }
     return ret;
@@ -262,6 +263,7 @@ bool asst::MinitouchController::swipe(
     if (!m_minitoucher->up()) {
         return false;
     }
+    invalidate_bluestacks_stream_frame();
     m_minitoucher->extra_sleep();
     return true;
 }
@@ -277,28 +279,41 @@ bool asst::MinitouchController::inject_input_event(const InputEvent& event)
         }
     }
 
+    bool ret = false;
     switch (event.type) {
     case InputEvent::Type::KEY_DOWN:
-        return m_minitoucher->key_down(event.keycode, 0, false);
+        ret = m_minitoucher->key_down(event.keycode, 0, false);
+        break;
     case InputEvent::Type::KEY_UP:
-        return m_minitoucher->key_up(event.keycode, 0, false);
+        ret = m_minitoucher->key_up(event.keycode, 0, false);
+        break;
     case InputEvent::Type::TOUCH_DOWN:
-        return m_minitoucher->down(event.point.x, event.point.y, 0, false, event.pointerId);
+        ret = m_minitoucher->down(event.point.x, event.point.y, 0, false, event.pointerId);
+        break;
     case InputEvent::Type::TOUCH_UP:
-        return m_minitoucher->up(0, false, event.pointerId);
+        ret = m_minitoucher->up(0, false, event.pointerId);
+        break;
     case InputEvent::Type::TOUCH_MOVE:
-        return m_minitoucher->move(event.point.x, event.point.y, 0, false, event.pointerId);
+        ret = m_minitoucher->move(event.point.x, event.point.y, 0, false, event.pointerId);
+        break;
     case InputEvent::Type::TOUCH_RESET:
-        return m_minitoucher->reset();
+        ret = m_minitoucher->reset();
+        break;
     case InputEvent::Type::WAIT_MS:
         return m_minitoucher->wait(event.milisec);
     case InputEvent::Type::COMMIT:
-        return m_minitoucher->commit();
+        ret = m_minitoucher->commit();
+        break;
     case InputEvent::Type::UNKNOWN:
     default:
         Log.error("unknown input event type");
         return false;
     }
+
+    if (ret) {
+        invalidate_bluestacks_stream_frame();
+    }
+    return ret;
 }
 
 asst::ControlFeat::Feat asst::MinitouchController::support_features() const noexcept

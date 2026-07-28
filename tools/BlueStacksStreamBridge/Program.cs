@@ -704,13 +704,18 @@ internal static class Program
         private const int PublishedFramesOffset = 40;
         private const int DecodedHostUsOffset = 48;
         private const int QpcFrequencyOffset = 56;
+        private const int ProducerHeartbeatUsOffset = 64;
+        private const int HeartbeatIntervalMs = 100;
 
         private readonly MemoryMappedFile _mapping;
         private readonly MemoryMappedViewAccessor _view;
         private readonly int _frameBytes;
+        private readonly CancellationTokenSource _heartbeatCancellation = new();
+        private readonly Task _heartbeatTask;
         private byte* _base;
         private long* _sequence;
         private long* _publishedFrames;
+        private long* _producerHeartbeatUs;
         private bool _disposed;
 
         public LatestFrameMapping(string name, int width, int height, int frameBytes)
@@ -728,7 +733,13 @@ internal static class Program
             _base = pointer + checked((int)_view.PointerOffset);
             _sequence = (long*)(_base + SequenceOffset);
             _publishedFrames = (long*)(_base + PublishedFramesOffset);
+            _producerHeartbeatUs = (long*)(_base + ProducerHeartbeatUsOffset);
             Initialize(width, height);
+            _heartbeatTask = Task.Factory.StartNew(
+                HeartbeatLoop,
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
         }
 
         public long PublishedFrames => Interlocked.Read(ref *_publishedFrames);
@@ -745,6 +756,16 @@ internal static class Program
             Thread.MemoryBarrier();
             var publishedSequence = Interlocked.Increment(ref *_sequence);
             if ((publishedSequence & 1) != 0) throw new InvalidOperationException("Shared-memory sequence counter did not publish an even value.");
+        }
+
+        private void HeartbeatLoop()
+        {
+            var cancellationToken = _heartbeatCancellation.Token;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                Interlocked.Exchange(ref *_producerHeartbeatUs, HostUs());
+                if (cancellationToken.WaitHandle.WaitOne(HeartbeatIntervalMs)) break;
+            }
         }
 
         private Span<byte> Header => new(_base, HeaderBytes);
@@ -764,6 +785,7 @@ internal static class Program
             BinaryPrimitives.WriteInt32LittleEndian(header[24..], checked(width * 4));
             BinaryPrimitives.WriteInt32LittleEndian(header[28..], _frameBytes);
             BinaryPrimitives.WriteInt64LittleEndian(header[QpcFrequencyOffset..], Stopwatch.Frequency);
+            Interlocked.Exchange(ref *_producerHeartbeatUs, HostUs());
             Thread.MemoryBarrier();
             Interlocked.Exchange(ref *_sequence, 0);
             BinaryPrimitives.WriteUInt32LittleEndian(header, Magic);
@@ -773,6 +795,9 @@ internal static class Program
         {
             if (_disposed) return;
             _disposed = true;
+            _heartbeatCancellation.Cancel();
+            _heartbeatTask.GetAwaiter().GetResult();
+            _heartbeatCancellation.Dispose();
             _view.SafeMemoryMappedViewHandle.ReleasePointer();
             _view.Dispose();
             _mapping.Dispose();

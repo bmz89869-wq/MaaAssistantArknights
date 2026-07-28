@@ -142,6 +142,7 @@ protected:
     void clear_lf_info();
 
     virtual void clear_info() noexcept;
+    void invalidate_bluestacks_stream_frame() noexcept;
     void callback(AsstMsg msg, const json::value& details);
     static std::optional<int> get_mumu_index(const std::string& address);
     void init_mumu_extras(const AdbCfg& adb_cfg, const std::string& address);

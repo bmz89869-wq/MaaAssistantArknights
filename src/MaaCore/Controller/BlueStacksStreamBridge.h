@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -54,11 +55,13 @@ private:
         volatile LONG64 published_frames;
         std::int64_t decoded_host_us;
         std::int64_t qpc_frequency;
-        std::byte reserved[64];
+        volatile LONG64 producer_heartbeat_us;
+        std::byte reserved[56];
     };
 #pragma pack(pop)
 
     static_assert(sizeof(SharedFrameHeader) == 128);
+    static_assert(offsetof(SharedFrameHeader, producer_heartbeat_us) == 64);
 
     static constexpr std::uint32_t Magic = 0x4241414D; // "MAAB"
     static constexpr std::uint32_t Version = 1;
@@ -68,15 +71,53 @@ private:
     static constexpr std::int32_t OutputWidth = 1280;
     static constexpr std::int32_t OutputHeight = 720;
     static constexpr std::int64_t InputFrameWaitUs = 250'000;
+    static constexpr std::int64_t MaximumHeartbeatAgeUs = 1'000'000;
+    static constexpr std::int64_t StaticFrameAgeUs = 250'000;
+
+    enum class Status : std::uint8_t
+    {
+        Stopped,
+        Unavailable,
+        Starting,
+        WaitingForPostInputFrame,
+        Ready,
+        StaticReuse,
+        AdbFallback,
+    };
+
+    enum class Reason : std::uint8_t
+    {
+        None,
+        MissingExecutable,
+        MissingScrcpyServer,
+        MissingAdb,
+        MissingFfmpeg,
+        StopEventCreationFailed,
+        ProcessCreationFailed,
+        ProcessResumeFailed,
+        MapUnavailable,
+        InvalidHeader,
+        StaleHeartbeat,
+        FrameWriteRace,
+        PostInputFramePending,
+        PostInputTimeout,
+        ProcessExited,
+        ConversionFailed,
+    };
 
     bool open_mapping() noexcept;
     bool process_running() noexcept;
-    bool try_screencap(cv::Mat& image, std::int64_t required_after_us);
+    Reason try_screencap(cv::Mat& image, std::int64_t required_after_us);
     void close_mapping() noexcept;
+    void stop_locked() noexcept;
+    void set_status(Status status, Reason reason = Reason::None) noexcept;
+    static const char* status_name(Status status) noexcept;
+    static const char* reason_name(Reason reason) noexcept;
     static std::wstring quote_arg(const std::wstring& value);
     static std::int64_t query_performance_counter_us(std::int64_t frequency) noexcept;
     static std::int64_t query_performance_counter_us() noexcept;
 
+    std::mutex m_mutex;
     HANDLE m_process = nullptr;
     HANDLE m_job = nullptr;
     HANDLE m_stop_event = nullptr;
@@ -86,7 +127,9 @@ private:
     std::vector<std::uint8_t> m_frame_buffer;
     std::chrono::steady_clock::time_point m_started_at;
     std::atomic<std::int64_t> m_required_frame_after_us = 0;
-    bool m_ready_logged = false;
+    Status m_status = Status::Stopped;
+    Reason m_status_reason = Reason::None;
+    bool m_has_accepted_frame = false;
     bool m_exit_logged = false;
 };
 } // namespace asst

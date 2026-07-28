@@ -415,6 +415,13 @@ bool asst::AdbController::inited() const noexcept
     return m_inited;
 }
 
+void asst::AdbController::invalidate_bluestacks_stream_frame() noexcept
+{
+#ifdef _WIN32
+    m_bluestacks_stream_bridge.invalidate_after_input();
+#endif
+}
+
 bool asst::AdbController::start_game(const std::string& client_type)
 {
     if (client_type.empty()) {
@@ -427,11 +434,9 @@ bool asst::AdbController::start_game(const std::string& client_type)
 
     std::string cur_cmd = utils::string_replace_all(m_adb.start, "[PackageName]", package_name.value());
     bool ret = call_command(cur_cmd).has_value();
-#ifdef _WIN32
     if (ret) {
-        m_bluestacks_stream_bridge.invalidate_after_input();
+        invalidate_bluestacks_stream_frame();
     }
-#endif
 
     return ret;
 }
@@ -447,11 +452,9 @@ bool asst::AdbController::stop_game(const std::string& client_type)
     }
     std::string cur_cmd = utils::string_replace_all(m_adb.stop, "[PackageName]", package_name.value());
     bool ret = call_command(cur_cmd).has_value();
-#ifdef _WIN32
     if (ret) {
-        m_bluestacks_stream_bridge.invalidate_after_input();
+        invalidate_bluestacks_stream_frame();
     }
-#endif
 
     return ret;
 }
@@ -465,11 +468,9 @@ bool asst::AdbController::click(const Point& p)
     std::string cur_cmd =
         utils::string_replace_all(m_adb.click, { { "[x]", std::to_string(p.x) }, { "[y]", std::to_string(p.y) } });
     const bool ret = call_command(cur_cmd).has_value();
-#ifdef _WIN32
     if (ret) {
-        m_bluestacks_stream_bridge.invalidate_after_input();
+        invalidate_bluestacks_stream_frame();
     }
-#endif
     return ret;
 }
 
@@ -481,11 +482,9 @@ bool asst::AdbController::input(const std::string& text)
 
     std::string cur_cmd = utils::string_replace_all(m_adb.input, { { "[text]", text } });
     const bool ret = call_command(cur_cmd).has_value();
-#ifdef _WIN32
     if (ret) {
-        m_bluestacks_stream_bridge.invalidate_after_input();
+        invalidate_bluestacks_stream_frame();
     }
-#endif
     return ret;
 }
 
@@ -536,11 +535,9 @@ bool asst::AdbController::swipe(
             });
         ret &= call_command(extra_cmd).has_value();
     }
-#ifdef _WIN32
     if (ret) {
-        m_bluestacks_stream_bridge.invalidate_after_input();
+        invalidate_bluestacks_stream_frame();
     }
-#endif
     return ret;
 }
 
@@ -549,11 +546,9 @@ bool asst::AdbController::press_esc()
     LogTraceFunction;
 
     const bool ret = call_command(m_adb.press_esc).has_value();
-#ifdef _WIN32
     if (ret) {
-        m_bluestacks_stream_bridge.invalidate_after_input();
+        invalidate_bluestacks_stream_frame();
     }
-#endif
     return ret;
 }
 
@@ -1423,10 +1418,8 @@ void asst::AdbController::check_fps()
 void asst::AdbController::back_to_home() noexcept
 {
     const auto ret = call_command(m_adb.back_to_home);
-#ifdef _WIN32
     if (ret) {
-        m_bluestacks_stream_bridge.invalidate_after_input();
+        invalidate_bluestacks_stream_frame();
     }
-#endif
     return;
 }

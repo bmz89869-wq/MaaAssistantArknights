@@ -14,12 +14,19 @@ $env:TEMP = $tempDir
 $env:TMP = $tempDir
 $env:MSBUILDDISABLENODEREUSE = '1'
 
-dotnet publish (Join-Path $projectDir 'BlueStacksStreamBridge.csproj') -c Release -o $publishDir
+dotnet publish (Join-Path $projectDir 'BlueStacksStreamBridge.csproj') `
+    -c Release `
+    --self-contained false `
+    -p:UseAppHost=true `
+    -p:DebugType=None `
+    -p:DebugSymbols=false `
+    -o $publishDir
 if ($LASTEXITCODE -ne 0) {
     throw "BlueStacksStreamBridge publish failed with exit code $LASTEXITCODE."
 }
 
 Get-ChildItem -LiteralPath $publishDir -File | Copy-Item -Destination $destinationDir -Force
 Copy-Item -LiteralPath (Join-Path $projectDir 'vendor\scrcpy-server-v4.1') -Destination $destinationDir -Force
+Copy-Item -LiteralPath (Join-Path $projectDir 'vendor\SCRCPY-LICENSE') -Destination $destinationDir -Force
 
 Write-Output "BlueStacksStreamBridge deployed to $destinationDir"

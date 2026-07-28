@@ -209,6 +209,40 @@ jobs:
         run: |
           dotnet publish src/MaaWpfGui/MaaWpfGui.csproj -c Release -p:Platform=${{ matrix.arch == 'arm64' && 'ARM64' || 'x64' }} -o install
 
+      - name: Publish BlueStacks stream bridge
+        shell: pwsh
+        run: |
+          $rid = if ('${{ matrix.arch }}' -eq 'arm64') { 'win-arm64' } else { 'win-x64' }
+          $output = 'install\BlueStacksStreamBridge'
+          dotnet publish tools\BlueStacksStreamBridge\BlueStacksStreamBridge.csproj `
+            -c Release `
+            -r $rid `
+            --self-contained false `
+            -p:UseAppHost=true `
+            -p:DebugType=None `
+            -p:DebugSymbols=false `
+            -o $output
+          if ($LASTEXITCODE -ne 0) { throw "BlueStacks stream bridge publish failed for $rid." }
+
+          Copy-Item tools\BlueStacksStreamBridge\vendor\scrcpy-server-v4.1 $output
+          Copy-Item tools\BlueStacksStreamBridge\vendor\SCRCPY-LICENSE $output
+          $required = @(
+            'BlueStacksStreamBridge.exe',
+            'BlueStacksStreamBridge.dll',
+            'BlueStacksStreamBridge.deps.json',
+            'BlueStacksStreamBridge.runtimeconfig.json',
+            'scrcpy-server-v4.1',
+            'SCRCPY-LICENSE'
+          )
+          foreach ($file in $required) {
+            if (!(Test-Path (Join-Path $output $file) -PathType Leaf)) {
+              throw "Required BlueStacks stream bridge file is missing: $file"
+            }
+          }
+          if (Get-ChildItem $output -Filter *.pdb -File) {
+            throw 'BlueStacks stream bridge publish unexpectedly contains PDB files.'
+          }
+
       - name: Collect PDB files
         run: |
           cp build/bin/RelWithDebInfo/*.pdb install/

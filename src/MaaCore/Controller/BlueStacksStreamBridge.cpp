@@ -2,6 +2,7 @@
 
 #ifdef _WIN32
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <limits>
@@ -24,13 +25,19 @@ bool asst::BlueStacksStreamBridge::start(
     const std::filesystem::path& adb_path,
     const std::string& address)
 {
-    stop();
+    std::scoped_lock lock(m_mutex);
+    stop_locked();
 
     const auto executable = bridge_dir / L"BlueStacksStreamBridge.exe";
     const auto server = bridge_dir / L"scrcpy-server-v4.1";
     const auto ffmpeg = adb_path.parent_path() / L"ffmpeg.exe";
     if (!std::filesystem::exists(executable) || !std::filesystem::exists(server) ||
         !std::filesystem::exists(adb_path) || !std::filesystem::exists(ffmpeg)) {
+        const auto reason = !std::filesystem::exists(executable) ? Reason::MissingExecutable
+                            : !std::filesystem::exists(server)   ? Reason::MissingScrcpyServer
+                            : !std::filesystem::exists(adb_path) ? Reason::MissingAdb
+                                                                : Reason::MissingFfmpeg;
+        set_status(Status::Unavailable, reason);
         LogInfo << "BlueStacks stream bridge unavailable" << VAR(executable) << VAR(server) << VAR(adb_path)
                 << VAR(ffmpeg);
         return false;
@@ -42,7 +49,10 @@ bool asst::BlueStacksStreamBridge::start(
     const auto stop_event_name = L"Local\\MAA.BlueStacksStreamBridge.Stop." + suffix;
     m_stop_event = ::CreateEventW(nullptr, TRUE, FALSE, stop_event_name.c_str());
     if (m_stop_event == nullptr) {
-        Log.warn("CreateEventW for BlueStacks stream bridge failed", ::GetLastError());
+        const auto error = ::GetLastError();
+        stop_locked();
+        set_status(Status::Unavailable, Reason::StopEventCreationFailed);
+        Log.warn("CreateEventW for BlueStacks stream bridge failed", error);
         return false;
     }
 
@@ -81,8 +91,10 @@ bool asst::BlueStacksStreamBridge::start(
         &startup_info,
         &process_info);
     if (!created) {
-        Log.warn("CreateProcessW for BlueStacks stream bridge failed", ::GetLastError());
-        stop();
+        const auto error = ::GetLastError();
+        stop_locked();
+        set_status(Status::Unavailable, Reason::ProcessCreationFailed);
+        Log.warn("CreateProcessW for BlueStacks stream bridge failed", error);
         return false;
     }
 
@@ -95,10 +107,12 @@ bool asst::BlueStacksStreamBridge::start(
     const auto resume_result = ::ResumeThread(process_info.hThread);
     ::CloseHandle(process_info.hThread);
     if (resume_result == static_cast<DWORD>(-1)) {
-        Log.warn("ResumeThread for BlueStacks stream bridge failed", ::GetLastError());
+        const auto error = ::GetLastError();
+        Log.warn("ResumeThread for BlueStacks stream bridge failed", error);
         ::TerminateProcess(m_process, 1);
         ::WaitForSingleObject(m_process, 1000);
-        stop();
+        stop_locked();
+        set_status(Status::Unavailable, Reason::ProcessResumeFailed);
         return false;
     }
     Log.info(
@@ -106,11 +120,21 @@ bool asst::BlueStacksStreamBridge::start(
         process_info.dwProcessId,
         std::filesystem::path(m_mapping_name));
     m_started_at = std::chrono::steady_clock::now();
+    set_status(Status::Starting);
     return true;
 }
 
 bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
 {
+    std::scoped_lock lock(m_mutex);
+    if (m_process == nullptr) {
+        if (m_status == Status::Stopped) {
+            return false;
+        }
+        set_status(Status::AdbFallback, m_status_reason);
+        return false;
+    }
+
     constexpr auto StartupWarmup = std::chrono::milliseconds(1500);
     const auto attempt_started_at = std::chrono::steady_clock::now();
     const auto startup_deadline = m_started_at + StartupWarmup;
@@ -118,29 +142,58 @@ bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
 
     do {
         const auto required_after_us = m_required_frame_after_us.load(std::memory_order_acquire);
-        if (try_screencap(image, required_after_us)) {
+        const auto reason = try_screencap(image, required_after_us);
+        if (reason == Reason::None) {
             return true;
         }
 
-        const auto deadline = !m_ready_logged ? startup_deadline
-                                               : required_after_us > 0 ? input_deadline : attempt_started_at;
+        const auto deadline = !m_has_accepted_frame ? startup_deadline
+                                                     : required_after_us > 0 ? input_deadline : attempt_started_at;
+        const auto process_alive = reason != Reason::ProcessExited && process_running();
         if (m_started_at == std::chrono::steady_clock::time_point {} ||
-            std::chrono::steady_clock::now() >= deadline || !process_running()) {
+            std::chrono::steady_clock::now() >= deadline || !process_alive) {
+            auto fallback_reason = reason;
+            if (!process_alive) {
+                fallback_reason = Reason::ProcessExited;
+            }
+            else if (reason == Reason::PostInputFramePending) {
+                fallback_reason = Reason::PostInputTimeout;
+            }
+            set_status(Status::AdbFallback, fallback_reason);
             return false;
         }
+
+        set_status(
+            required_after_us > 0 ? Status::WaitingForPostInputFrame : Status::Starting,
+            reason);
         ::Sleep(20);
     } while (true);
 }
 
 void asst::BlueStacksStreamBridge::invalidate_after_input() noexcept
 {
-    m_required_frame_after_us.store(query_performance_counter_us(), std::memory_order_release);
+    const auto input_us = query_performance_counter_us();
+    if (input_us <= 0) {
+        return;
+    }
+
+    auto previous = m_required_frame_after_us.load(std::memory_order_relaxed);
+    while (previous < input_us && !m_required_frame_after_us.compare_exchange_weak(
+                                      previous,
+                                      input_us,
+                                      std::memory_order_release,
+                                      std::memory_order_relaxed)) {
+    }
 }
 
-bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image, std::int64_t required_after_us)
+asst::BlueStacksStreamBridge::Reason
+    asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image, std::int64_t required_after_us)
 {
-    if (!process_running() || (!m_view && !open_mapping())) {
-        return false;
+    if (!process_running()) {
+        return Reason::ProcessExited;
+    }
+    if (!m_view && !open_mapping()) {
+        return Reason::MapUnavailable;
     }
 
     const auto* header = reinterpret_cast<const SharedFrameHeader*>(m_view);
@@ -148,13 +201,26 @@ bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image, std::int64_t re
         header->pixel_format != Bgra || header->width != OutputWidth || header->height != OutputHeight ||
         header->stride != header->width * 4 ||
         header->qpc_frequency <= 0) {
-        return false;
+        return Reason::InvalidHeader;
     }
 
     const auto expected_frame_bytes = static_cast<std::int64_t>(header->stride) * header->height;
     if (header->frame_bytes != expected_frame_bytes || header->frame_bytes <= 0 ||
         static_cast<std::size_t>(header->frame_bytes) > MappingBytes - HeaderBytes) {
-        return false;
+        return Reason::InvalidHeader;
+    }
+
+    LARGE_INTEGER local_frequency {};
+    if (!::QueryPerformanceFrequency(&local_frequency) || local_frequency.QuadPart != header->qpc_frequency) {
+        return Reason::InvalidHeader;
+    }
+    const auto now_us = query_performance_counter_us(local_frequency.QuadPart);
+    const std::atomic_ref<LONG64> heartbeat(const_cast<LONG64&>(header->producer_heartbeat_us));
+    const auto producer_heartbeat_us = heartbeat.load(std::memory_order_acquire);
+    const auto heartbeat_age_us = now_us - producer_heartbeat_us;
+    if (now_us <= 0 || producer_heartbeat_us <= 0 || heartbeat_age_us < -50'000 ||
+        heartbeat_age_us > MaximumHeartbeatAgeUs) {
+        return Reason::StaleHeartbeat;
     }
 
     // InterlockedCompareExchange64 is a read-modify-write operation and faults on FILE_MAP_READ views.
@@ -171,7 +237,6 @@ bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image, std::int64_t re
         const auto stride = header->stride;
         const auto frame_bytes = header->frame_bytes;
         const auto decoded_host_us = header->decoded_host_us;
-        const auto qpc_frequency = header->qpc_frequency;
         m_frame_buffer.resize(static_cast<std::size_t>(frame_bytes));
         std::memcpy(m_frame_buffer.data(), m_view + HeaderBytes, m_frame_buffer.size());
 
@@ -180,21 +245,29 @@ bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image, std::int64_t re
             continue;
         }
 
-        const auto now_us = query_performance_counter_us(qpc_frequency);
         const auto age_us = now_us - decoded_host_us;
-        if (now_us <= 0 || decoded_host_us <= 0 || age_us < -50'000 ||
-            (required_after_us > 0 && decoded_host_us < required_after_us)) {
-            return false;
+        if (decoded_host_us <= 0 || age_us < -50'000) {
+            return Reason::InvalidHeader;
         }
 
-        cv::Mat bgra(height, width, CV_8UC4, m_frame_buffer.data(), static_cast<std::size_t>(stride));
-        cv::cvtColor(bgra, image, cv::COLOR_BGRA2BGR);
-        if (image.empty()) {
-            return false;
+        required_after_us = (std::max)(
+            required_after_us,
+            m_required_frame_after_us.load(std::memory_order_acquire));
+        if (required_after_us > 0 && decoded_host_us < required_after_us) {
+            return Reason::PostInputFramePending;
         }
-        if (!m_ready_logged) {
-            Log.info("BlueStacks stream bridge first frame accepted", width, height, "age", age_us, "us");
-            m_ready_logged = true;
+
+        try {
+            cv::Mat bgra(height, width, CV_8UC4, m_frame_buffer.data(), static_cast<std::size_t>(stride));
+            cv::cvtColor(bgra, image, cv::COLOR_BGRA2BGR);
+        }
+        catch (const cv::Exception& exception) {
+            Log.warn("BlueStacks stream bridge frame conversion failed", exception.what());
+            image.release();
+            return Reason::ConversionFailed;
+        }
+        if (image.empty()) {
+            return Reason::ConversionFailed;
         }
 
         auto expected_required_after_us = required_after_us;
@@ -205,12 +278,29 @@ bool asst::BlueStacksStreamBridge::try_screencap(cv::Mat& image, std::int64_t re
                 std::memory_order_release,
                 std::memory_order_relaxed);
         }
-        return true;
+        if (!m_has_accepted_frame) {
+            Log.info(
+                "BlueStacks stream bridge first frame accepted",
+                width,
+                height,
+                "age",
+                age_us,
+                "us");
+        }
+        m_has_accepted_frame = true;
+        set_status(age_us > StaticFrameAgeUs ? Status::StaticReuse : Status::Ready);
+        return Reason::None;
     }
-    return false;
+    return Reason::FrameWriteRace;
 }
 
 void asst::BlueStacksStreamBridge::stop() noexcept
+{
+    std::scoped_lock lock(m_mutex);
+    stop_locked();
+}
+
+void asst::BlueStacksStreamBridge::stop_locked() noexcept
 {
     close_mapping();
     if (m_stop_event != nullptr) {
@@ -231,8 +321,9 @@ void asst::BlueStacksStreamBridge::stop() noexcept
     m_frame_buffer.clear();
     m_started_at = {};
     m_required_frame_after_us.store(0, std::memory_order_relaxed);
-    m_ready_logged = false;
+    m_has_accepted_frame = false;
     m_exit_logged = false;
+    set_status(Status::Stopped);
 }
 
 bool asst::BlueStacksStreamBridge::open_mapping() noexcept
@@ -266,6 +357,7 @@ bool asst::BlueStacksStreamBridge::process_running() noexcept
         m_exit_logged = true;
     }
     close_mapping();
+    set_status(Status::AdbFallback, Reason::ProcessExited);
     return false;
 }
 
@@ -275,6 +367,78 @@ void asst::BlueStacksStreamBridge::close_mapping() noexcept
     if (m_mapping != nullptr) ::CloseHandle(m_mapping);
     m_view = nullptr;
     m_mapping = nullptr;
+}
+
+void asst::BlueStacksStreamBridge::set_status(Status status, Reason reason) noexcept
+{
+    if (m_status == status && m_status_reason == reason) {
+        return;
+    }
+    m_status = status;
+    m_status_reason = reason;
+    Log.info("BlueStacks stream bridge state", status_name(status), "reason", reason_name(reason));
+}
+
+const char* asst::BlueStacksStreamBridge::status_name(Status status) noexcept
+{
+    switch (status) {
+    case Status::Stopped:
+        return "stopped";
+    case Status::Unavailable:
+        return "unavailable";
+    case Status::Starting:
+        return "starting";
+    case Status::WaitingForPostInputFrame:
+        return "waiting_post_input";
+    case Status::Ready:
+        return "ready";
+    case Status::StaticReuse:
+        return "static_reuse";
+    case Status::AdbFallback:
+        return "adb_fallback";
+    default:
+        return "unknown";
+    }
+}
+
+const char* asst::BlueStacksStreamBridge::reason_name(Reason reason) noexcept
+{
+    switch (reason) {
+    case Reason::None:
+        return "none";
+    case Reason::MissingExecutable:
+        return "missing_executable";
+    case Reason::MissingScrcpyServer:
+        return "missing_scrcpy_server";
+    case Reason::MissingAdb:
+        return "missing_adb";
+    case Reason::MissingFfmpeg:
+        return "missing_ffmpeg";
+    case Reason::StopEventCreationFailed:
+        return "stop_event_creation_failed";
+    case Reason::ProcessCreationFailed:
+        return "process_creation_failed";
+    case Reason::ProcessResumeFailed:
+        return "process_resume_failed";
+    case Reason::MapUnavailable:
+        return "map_unavailable";
+    case Reason::InvalidHeader:
+        return "invalid_header";
+    case Reason::StaleHeartbeat:
+        return "stale_heartbeat";
+    case Reason::FrameWriteRace:
+        return "frame_write_race";
+    case Reason::PostInputFramePending:
+        return "post_input_frame_pending";
+    case Reason::PostInputTimeout:
+        return "post_input_timeout";
+    case Reason::ProcessExited:
+        return "process_exited";
+    case Reason::ConversionFailed:
+        return "conversion_failed";
+    default:
+        return "unknown";
+    }
 }
 
 std::wstring asst::BlueStacksStreamBridge::quote_arg(const std::wstring& value)
