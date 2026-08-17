@@ -71,6 +71,7 @@ private:
     static constexpr std::int32_t OutputWidth = 1280;
     static constexpr std::int32_t OutputHeight = 720;
     static constexpr std::int64_t InputFrameWaitUs = 250'000;
+    static constexpr std::int64_t FrameWriteWaitUs = 10'000;
     static constexpr std::int64_t MaximumHeartbeatAgeUs = 1'000'000;
     static constexpr std::int64_t StaticFrameAgeUs = 250'000;
 

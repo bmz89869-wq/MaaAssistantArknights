@@ -18,9 +18,9 @@ MAA retries `OpenFileMappingW(FILE_MAP_READ, ...)` for up to 1.5 seconds after l
 
 `src/MaaCore/Controller/BlueStacksStreamBridge.*` is the consumer implementation and ABI source of truth. The named map is always `128 + 1920 * 1080 * 4` bytes. Only the first `frame_bytes` bytes after the 128-byte header contain pixels. The MAA child-process profile publishes a fixed `1280x720` frame, scaling and padding portrait source frames until BlueStacks returns to landscape.
 
-The pixels are tightly packed BGRA rows. `decoded_host_us` uses the Windows performance-counter clock converted to microseconds, so MAA can calculate age from its own performance-counter clock without clock conversion. `producer_heartbeat_us` is an aligned 64-bit value at header offset 64. The producer updates it about every 100 ms even when scrcpy emits no frame, and the consumer rejects it when it is invalid, uses a mismatched QPC frequency, or is more than one second old.
+The pixels are tightly packed BGRA rows. `decoded_host_us` contains the scrcpy capture PTS calibrated into the Windows performance-counter clock and converted to microseconds. It deliberately records when the device captured the frame, not when FFmpeg finished decoding it, so a buffered pre-input frame cannot satisfy the post-input watermark. `producer_heartbeat_us` is an aligned 64-bit value at header offset 64. The producer updates it about every 100 ms even when scrcpy emits no frame, and the consumer rejects it when it is invalid, uses a mismatched QPC frequency, or is more than one second old.
 
-The producer is the only writer. It increments `sequence` to an odd value, overwrites the pixels and metadata, then increments it to an even value. The reader copies only when the value before and after the copy is equal and even. This is a latest-frame transport: it never queues, waits for, or returns an older decoded frame after a write race.
+The producer is the only writer. It increments `sequence` to an odd value, overwrites the pixels and metadata, then increments it to an even value. The reader copies only when the value before and after the copy is equal and even. A transient collision is retried locally for at most 10 ms; the transport never returns a torn frame or queues stale frames.
 
 ## MAA call site
 

@@ -139,6 +139,7 @@ bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
     const auto attempt_started_at = std::chrono::steady_clock::now();
     const auto startup_deadline = m_started_at + StartupWarmup;
     const auto input_deadline = attempt_started_at + std::chrono::microseconds(InputFrameWaitUs);
+    const auto frame_write_deadline = attempt_started_at + std::chrono::microseconds(FrameWriteWaitUs);
 
     do {
         const auto required_after_us = m_required_frame_after_us.load(std::memory_order_acquire);
@@ -147,8 +148,10 @@ bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
             return true;
         }
 
-        const auto deadline = !m_has_accepted_frame ? startup_deadline
-                                                     : required_after_us > 0 ? input_deadline : attempt_started_at;
+        const auto deadline = !m_has_accepted_frame        ? startup_deadline
+                              : required_after_us > 0       ? input_deadline
+                              : reason == Reason::FrameWriteRace ? frame_write_deadline
+                                                                 : attempt_started_at;
         const auto process_alive = reason != Reason::ProcessExited && process_running();
         if (m_started_at == std::chrono::steady_clock::time_point {} ||
             std::chrono::steady_clock::now() >= deadline || !process_alive) {
@@ -166,7 +169,7 @@ bool asst::BlueStacksStreamBridge::screencap(cv::Mat& image)
         set_status(
             required_after_us > 0 ? Status::WaitingForPostInputFrame : Status::Starting,
             reason);
-        ::Sleep(20);
+        ::Sleep(reason == Reason::FrameWriteRace ? 1 : 20);
     } while (true);
 }
 

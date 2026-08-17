@@ -272,6 +272,9 @@ internal static class Program
             await RunAdbAsync(options, ["push", options.ServerPath, DeviceServerPath], TimeSpan.FromSeconds(20), cancellationToken);
         }
 
+        var clock = await CalibrateClockAsync(options, cancellationToken);
+        Stage("clock_calibrated", new { rttMs = clock.RttUs / 1000.0, mode = "shared_memory" });
+
         var port = ReserveTcpPort();
         var scid = RandomNumberGenerator.GetInt32(1, int.MaxValue);
         var socketName = $"scrcpy_{scid:x8}";
@@ -332,12 +335,13 @@ internal static class Program
 
             ffmpeg = StartFfmpeg(options, outputSession);
             ffmpegStderrTask = ffmpeg.StandardError.ReadToEndAsync();
+            var metadata = Channel.CreateUnbounded<PacketMeta>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
             var packetState = new PacketState();
             using var streamCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var pumpTask = PumpPacketsAsync(
                 stream,
                 ffmpeg.StandardInput.BaseStream,
-                null,
+                metadata.Writer,
                 packetState,
                 sourceSession,
                 allowSessionChanges: true,
@@ -351,7 +355,9 @@ internal static class Program
                 {
                     await ffmpeg.StandardOutput.BaseStream.ReadExactlyAsync(frame, streamCts.Token);
                     var decodedUs = HostUs();
-                    latestFrame.Publish(frame, decodedUs);
+                    var meta = await metadata.Reader.ReadAsync(streamCts.Token);
+                    var sourceHostUs = meta.PtsUs + clock.OffsetUs;
+                    latestFrame.Publish(frame, sourceHostUs);
                     if (firstFrameUs == 0)
                     {
                         firstFrameUs = decodedUs;
